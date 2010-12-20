@@ -1,0 +1,221 @@
+AC_PREREQ(2.57)
+AC_INIT(cryptsetup,1.1.3)
+
+dnl library version from <major>.<minor>.<release>[-<suffix>]
+LIBCRYPTSETUP_VERSION=$(echo $PACKAGE_VERSION | cut -f1 -d-)
+LIBCRYPTSETUP_VERSION_INFO=1:0:0
+
+AC_CONFIG_SRCDIR(src/cryptsetup.c)
+AC_CONFIG_MACRO_DIR([m4])
+
+AM_CONFIG_HEADER([config.h:config.h.in])
+AM_INIT_AUTOMAKE(dist-bzip2)
+
+if test "x$prefix" = "xNONE"; then
+	sysconfdir=/etc
+fi
+AC_PREFIX_DEFAULT(/usr)
+
+AC_CANONICAL_HOST
+AC_GNU_SOURCE
+AC_PROG_CC
+AM_PROG_CC_C_O
+AC_PROG_CPP
+AC_PROG_INSTALL
+AC_PROG_MAKE_SET
+AC_ENABLE_STATIC(no)
+AM_PROG_LIBTOOL
+
+AC_HEADER_DIRENT
+AC_HEADER_STDC
+AC_CHECK_HEADERS(fcntl.h malloc.h inttypes.h sys/ioctl.h sys/mman.h \
+	ctype.h unistd.h locale.h)
+
+PKG_PROG_PKG_CONFIG([0.22])
+
+AC_CHECK_HEADERS(uuid/uuid.h,,[AC_MSG_ERROR('You need the uuid library')])
+AC_CHECK_HEADER(libdevmapper.h,,[AC_MSG_ERROR('You need the device-mapper library')])
+
+saved_LIBS=$LIBS
+AC_CHECK_LIB(uuid, uuid_clear, ,[AC_MSG_ERROR('You need the uuid library')])
+AC_SUBST(UUID_LIBS, $LIBS)
+LIBS=$saved_LIBS
+
+
+AC_CHECK_FUNCS([posix_memalign])
+
+AC_C_CONST
+AC_C_BIGENDIAN
+AC_TYPE_OFF_T
+AC_STRUCT_ST_RDEV
+AC_SYS_LARGEFILE
+
+AC_PROG_GCC_TRADITIONAL
+
+dnl ==========================================================================
+
+AM_GNU_GETTEXT([external],[need-ngettext])
+AM_GNU_GETTEXT_VERSION([0.15])
+
+dnl ==========================================================================
+
+saved_LIBS=$LIBS
+AC_CHECK_LIB(popt, poptConfigFileToString,,
+	[AC_MSG_ERROR([You need popt 1.7 or newer to compile.])])
+AC_SUBST(POPT_LIBS, $LIBS)
+LIBS=$saved_LIBS
+
+dnl ==========================================================================
+
+AC_ARG_ENABLE(shared-library,
+[  --disable-shared-library
+                          disable building of shared cryptsetup library],,
+enable_shared_library=yes)
+AM_CONDITIONAL(STATIC_LIBRARY, test x$enable_shared_library = xno)
+
+AC_ARG_ENABLE(plugins,
+[  --enable-plugins        disable shared library plugins],,enable_plugins=no)
+if test "x$enable_plugins" = xyes; then
+	AC_DEFINE(USE_PLUGINS, 1, [Define if you wish to use the plugin loader])
+fi
+
+AC_ARG_ENABLE(, [
+Modules:
+  --with-MODULE[[=shared]]  builds the module MODULE as a shared library plugin
+],,)
+
+AC_ARG_ENABLE(all,
+[  --disable-all           disable all modules built by default],,enable_all=default)
+
+AC_ARG_ENABLE(gcrypt,
+[  --disable-gcrypt        disable gcrypt support [[default=no]]], ,
+	enable_gcrypt=yes)
+if test x$enable_gcrypt = xyes; then
+	AC_CHECK_LIB(gcrypt, gcry_check_version, have_gcrypt=yes, have_gcrypt=no)
+fi
+AM_CONDITIONAL(BUILD_LIBGCRYPT, test x$have_gcrypt = xyes)
+AM_CONDITIONAL(SHARED_LIBGCRYPT,
+	test x$enable_shared_library = xyes -a x$have_gcrypt = xyes)
+if test x$have_gcrypt = xyes; then
+	LIBGCRYPT_CFLAGS="`libgcrypt-config --cflags`"
+	LIBGCRYPT_LIBS="`libgcrypt-config --libs`"
+	AC_SUBST(LIBGCRYPT_CFLAGS)
+	AC_SUBST(LIBGCRYPT_LIBS)
+fi
+
+AC_ARG_ENABLE(openssl,
+[  --disable-openssl       disable openssl support [[default=no]]], ,
+	enable_openssl=yes)
+if test x$enable_openssl = xyes; then
+	PKG_CHECK_MODULES([OPENSSL], [libcrypto >= 0.9.8], AC_CHECK_LIB(crypto, SHA512, have_openssl=yes, have_openssl=no),
+							    have_openssl=no)
+fi
+AM_CONDITIONAL(BUILD_OPENSSL, test x$have_openssl = xyes)
+AM_CONDITIONAL(SHARED_OPENSSL,
+	test x$enable_shared_library = xyes -a x$have_openssl = xyes)
+
+if test x$have_gcrypt != xyes -a x$have_openssl != xyes; then
+	AC_MSG_ERROR('You need openSSL or/and gcrypt library as a crypto backend')
+fi
+
+AC_ARG_ENABLE(selinux,
+[  --disable-selinux       disable selinux support [[default=auto]]],[], [])
+
+AC_ARG_ENABLE([udev],AS_HELP_STRING([--disable-udev],[disable udev support]),[], enable_udev=yes)
+
+dnl Try to use pkg-config for devmapper, but fallback to old detection
+saved_LIBS=$LIBS
+if AC_RUN_LOG([pkg-config --exists --print-errors devmapper]); then
+	PKG_PROG_PKG_CONFIG
+	if test x$enable_static = xyes; then
+		PKG_CONFIG="$PKG_CONFIG --static"
+	fi
+	PKG_CHECK_MODULES([DEVMAPPER], [devmapper >= 1.02.03])
+	LIBS="$LIBS $DEVMAPPER_LIBS"
+	AC_SUBST(LIBDEVMAPPER_CFLAGS)
+else
+	AC_CHECK_LIB(devmapper, dm_task_set_name,,
+		[AC_MSG_ERROR('You need the device-mapper library')])
+	AC_CHECK_LIB(devmapper, dm_task_set_message,,
+		[AC_MSG_ERROR([The device-mapper library on your system is too old.])])
+	DEVMAPPER_LIBS=$LIBS
+fi
+
+AM_CONDITIONAL(BUILD_LIBDEVMAPPER, test x$build_static = xyes)
+AM_CONDITIONAL(SHARED_LIBDEVMAPPER, test x$build_shared = xyes)
+
+AC_CHECK_DECLS([DM_UDEV_DISABLE_DISK_RULES_FLAG], [have_cookie=yes], [have_cookie=no], [#include <libdevmapper.h>])
+if test "x$enable_udev" = xyes; then
+	if test "x$have_cookie" = xno; then
+		AC_MSG_WARN([The device-mapper library on your system has no udev support, udev support disabled.])
+	else
+		AC_DEFINE(USE_UDEV, 1, [Try to use udev synchronisation?])
+	fi
+fi
+
+LIBS=$saved_LIBS
+if test "x$enable_selinux" != xno; then
+	AC_CHECK_LIB(sepol, sepol_bool_set)
+	AC_CHECK_LIB(selinux, is_selinux_enabled)
+	if test x$enable_static = xyes; then
+		SELINUX_STATIC_LIBS=$LIBS
+		# Check if we need -pthread with --enable-static and selinux
+		saved_LIBS2=$LIBS
+		LIBS="$LIBS -static"
+		AC_SEARCH_LIBS([pthread_mutex_lock], [pthread],
+			[test "$ac_cv_search_pthread_mutex_lock" = "none required" || LIB_PTHREAD=-lpthread])
+		LIBS=$saved_LIBS2
+	fi
+fi
+
+LIBS=$saved_LIBS
+
+DEVMAPPER_LIBS="$DEVMAPPER_LIBS $LIB_PTHREAD"
+AC_SUBST([DEVMAPPER_LIBS])
+AC_SUBST([SELINUX_STATIC_LIBS])
+AC_SUBST([LIBCRYPTSETUP_VERSION])
+AC_SUBST([LIBCRYPTSETUP_VERSION_INFO])
+
+dnl ==========================================================================
+AC_DEFUN([CS_DEFINE],
+	[AC_DEFINE_UNQUOTED(DEFAULT_[]m4_translit([$1], [-a-z], [_A-Z]), [$2], [$3])
+])
+
+AC_DEFUN([CS_STR_WITH], [AC_ARG_WITH([$1],
+	[AS_HELP_STRING(--with-[$1], [default $2 [$3]])],
+	[CS_DEFINE([$1], ["$withval"], [$2])],
+	[CS_DEFINE([$1], ["$3"], [$2])]
+)])
+
+AC_DEFUN([CS_NUM_WITH], [AC_ARG_WITH([$1],
+	[AS_HELP_STRING(--with-[$1], [default $2 [$3]])],
+	[CS_DEFINE([$1], [$withval], [$2])],
+	[CS_DEFINE([$1], [$3], [$2])]
+)])
+
+CS_STR_WITH([plain-hash],   [password hashing function for plain mode], [ripemd160])
+CS_STR_WITH([plain-cipher], [cipher for plain mode], [aes])
+CS_STR_WITH([plain-mode],   [cipher mode for plain mode], [cbc-essiv:sha256])
+CS_NUM_WITH([plain-keybits],[key length in bits for plain mode], [256])
+
+CS_STR_WITH([luks1-hash],   [hash function for LUKS1 header], [sha1])
+CS_STR_WITH([luks1-cipher], [cipher for LUKS1], [aes])
+CS_STR_WITH([luks1-mode],   [cipher mode for LUKS1], [cbc-essiv:sha256])
+CS_NUM_WITH([luks1-keybits],[key length in bits for LUKS1], [256])
+
+dnl ==========================================================================
+
+AM_CONDITIONAL(STATIC_CRYPTSETUP, test x$enable_static = xyes)
+AM_CONDITIONAL(DYNAMIC_CRYPTSETUP, test x$enable_static = xno)
+
+dnl ==========================================================================
+
+AC_OUTPUT([ Makefile
+lib/Makefile
+lib/libcryptsetup.pc
+src/Makefile
+po/Makefile.in
+luks/Makefile
+man/Makefile
+tests/Makefile
+])
